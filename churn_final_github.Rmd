@@ -1,0 +1,225 @@
+---
+title: "Telco Churn Analysis - Service Bundling"
+author: "Anuj Rewale, Jie Liu"
+output:
+  rmarkdown::github_document
+toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r warning=FALSE, message=FALSE}
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+library(magrittr)
+library(RSQLite)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(arules)
+```
+
+```{r message = FALSE, warning=FALSE}
+setwd("~/Desktop/Churn/")
+df <- read_csv("WA_Fn-UseC_-Telco-Customer-Churn.csv")
+View(df)
+```
+
+# Section I 
+## Telecom Business Landscape
+
+```{r}
+df %>% group_by(PhoneService, InternetService, Churn) %>% 
+  summarise(NumberOfUsers = n(), AvgMonthlyCharges=mean(MonthlyCharges)) %>%
+  add_column(ServiceSubscribed = c("DSL Only", "DSL Only", "DSL and Phone", "DSL and Phone","Fiber Optic and Phone","Fiber Optic and Phone","Phone Only","Phone Only")) %>%
+  ggplot(aes(x=ServiceSubscribed, y=NumberOfUsers, fill=Churn)) + geom_bar(stat = 'identity') + theme_classic() + labs(title = "Number of Users Subscribed to Different Service Packages \nAnd Average Monthly Charges") + geom_point(aes(x=ServiceSubscribed,y=AvgMonthlyCharges * 30, group=1, shape=Churn), inherit.aes = FALSE) + scale_y_continuous(sec.axis = sec_axis(~. /30, name = "Average Monthly Charges"))
+
+```
+
+There are two types of contract with the company, one for internet and one for phone service. As we can see from the graph, the main revenue generating business are Fiber Optic and Phone services packages with more than 3000 users subscribed. Whereas, around 750 customers only subscribe to DSL internet service. 
+
+When it comes to assumptions about users churning, the naive thoughts top off our heads are pricing. We thought users churn because they are charged with too high a price, however this plot contradicts this assumption, in that across 4 service packages,  retaining users are actually spending more on average per month than churned users.  
+
+In addition, in our intuitive sense, we think people who engaged with the company more (users who have more service with the company) should be less likely to churn. However, Fiber Optic and Phone Service package users have the highest churning rate among them. Users who only subscribe to phone services actually have the least percentage of churning around 10%. It is known that retaining an existing customer costs less than acquiring new users. 
+
+As Fiber Optic and Phone service users bring us the most revenue, we naturally want to analyze why fiber optic and phone users have higher churn rate and how to retain them? 
+
+
+## What affects fiber optic users to churn? 
+Let’s narrow down to users who subscribed to fiber optic and phone service. With the assumption that package bundles have a difference on churn rate, we plot the dynamics of service bundles and churn.
+
+We find that streaming service did not have much difference.
+```{r}
+df %>% filter(InternetService =='Fiber optic') %>% 
+  group_by(StreamingTV,Churn) %>%
+  summarise(NumberOfUsers = n()) %>% 
+  ggplot(aes(x=StreamingTV, y=NumberOfUsers, fill = Churn)) + geom_bar(stat='identity') + theme_classic() + labs(title = "Fiber Optic Users With Streaming TV Service") 
+```
+
+```{r}
+
+df %>% filter(InternetService =='Fiber optic') %>% 
+  group_by(StreamingMovies,Churn) %>%
+  summarise(NumberOfUsers = n()) %>% 
+  ggplot(aes(x=StreamingMovies, y=NumberOfUsers, fill = Churn)) + geom_bar(stat='identity') + theme_classic() + labs(title = "Fiber Optic Users with Streaming Movies Service ") 
+```
+
+However, users who have security services are less likely to churn. We define security related services as online security, online backup, tech support, device protection.
+```{r}
+df %>% filter(InternetService =='Fiber optic') %>% 
+  group_by(OnlineSecurity,Churn) %>%
+  summarise(NumberOfUsers = n()) %>% 
+  ggplot(aes(x=OnlineSecurity, y=NumberOfUsers, fill = Churn)) + geom_bar(stat='identity') + theme_classic() + labs(title = "Fiber Optic Users With Online Security Serivce are less likely to churn") 
+```
+```{r}
+df %>% filter(InternetService =='Fiber optic') %>% 
+  group_by(TechSupport,Churn) %>%
+  summarise(NumberOfUsers = n()) %>% 
+  ggplot(aes(x=TechSupport, y=NumberOfUsers, fill = Churn)) + geom_bar(stat='identity') + theme_classic() + labs(title = "Fiber Optic Users With TechSupport") + labs(title = "Fiber Optic Users With Tech Support Serivce are less likely to churn") 
+```
+
+```{r}
+df %>% filter(InternetService =='Fiber optic') %>% 
+  group_by(DeviceProtection,Churn) %>%
+  summarise(NumberOfUsers = n()) %>% 
+  ggplot(aes(x=DeviceProtection, y=NumberOfUsers, fill = Churn)) + geom_bar(stat='identity') + theme_classic() + labs(title = "Fiber Optic Users With Device Protection") 
+```
+
+```{r}
+df %>% filter(InternetService =='Fiber optic') %>% 
+  group_by(OnlineBackup,Churn) %>%
+  summarise(NumberOfUsers = n()) %>% 
+  ggplot(aes(x=OnlineBackup, y=NumberOfUsers, fill = Churn)) + geom_bar(stat='identity') + theme_classic() + labs(title = "Fiber Optic Users With OnlineBackup") 
+```
+
+
+
+# Section II
+## Arules for Fiber Optic Users Cart
+
+```{r}
+Data_subset <- df[,c("InternetService","OnlineSecurity",
+                       "OnlineBackup", "TechSupport",
+                       "MonthlyCharges","DeviceProtection",
+                       "StreamingMovies", "StreamingTV",
+                       "SeniorCitizen","Churn")]
+Data_subset <- Data_subset[which(Data_subset$InternetService == 'Fiber optic'),]
+hist(Data_subset$MonthlyCharges) 
+Data_subset$Monthly_quartile <- with(Data_subset, cut(MonthlyCharges, 
+                                breaks=quantile(MonthlyCharges, probs=seq(0,1, by=0.25), na.rm=TRUE), 
+                                include.lowest=TRUE,labels=c("Low","Moderate","High","Very High"))
+                                )
+Data_subset$MonthlyCharges <- NULL
+Data_subset$InternetService <- NULL
+Data_subset$SeniorCitizen <- ifelse(Data_subset$SeniorCitizen == 0, "No", "Yes")
+
+rules <- apriori(Data_subset,parameter = list(supp = 0.1, conf = 0.2),appearance = list(default="lhs",rhs=c("Churn=Yes",  "Churn=No")))
+inspect(head(sort(rules,by = 'lift'),20))
+```
+As we can see from the output of the association rules. The rules show that users with no security related services are 1.5 more likely to churn, especially for non-senior customers. This supports our assumption that service bundling actually makes a difference for fiber optic users.
+The rules suggest that the co-occurrence of 2 services is observed the most. Having just 1 additional service to fiber optics might not be enough to retain a customer and having more than 2 services might be expensive for the customer and hence there are no significant number of instances and lift for such combinations of services. Hence, Telco should create  bundles of 2 services for fiber optic users that will reduce the churning rate of the customers.
+The rules provide four bundle packages that we could utilize to retain users. Based on the associate rules we suggest provide fiber optic users with 
+1.online security, tech support
+2.online security, online backup
+3.online security, device protection
+4.online backup, techsupport
+
+
+# Section III
+## How can we price the bundles?
+Since we did not have A/B testing, we can not say anything causal about the relationship between price and packages. However, by exploring the monthly payment difference between churning users and retained users of bundling packages might help us discover some leads in pricing.
+```{r}
+df$SeniorCitizen <- factor(df$SeniorCitizen, levels = c(0, 1),
+                  labels = c("Non-senior", "Senior")
+                  )
+```
+
+### online security, tech support
+First, we look at users who have online security and tech support services.
+```{r}
+df %>% 
+  filter(OnlineSecurity == 'Yes' & TechSupport == 'Yes' & InternetService == 'Fiber optic') %>%
+  group_by(tenure, Churn,) %>%
+  summarise(avgpayment = mean(MonthlyCharges)) %>%
+  ggplot(aes(x=tenure, y=avgpayment, color = Churn)) + geom_point() +geom_smooth() + labs(y='Average Monthly Payment', title = 'Fiber Optic Users With Online Security and Tech Support') 
+```
+ We can see that users who churn are being charged for on average $5-$10 more than retained users. We definitely suggest the company to bundle online security and tech support services with fiber optic internet and price them at around 85 per month at the beginning of the contract and as the tenure proceeds the price can be gradually increased to around 110.
+
+
+
+### online security, online backup
+```{r}
+df %>% 
+  filter(OnlineSecurity == 'Yes' & OnlineBackup == 'Yes' & InternetService == 'Fiber optic') %>%
+  group_by(tenure, Churn,) %>%
+  summarise(avgpayment = mean(MonthlyCharges)) %>%
+  ggplot(aes(x=tenure, y=avgpayment, color = Churn)) + geom_point() +geom_smooth()+ labs(y='Average Monthly Payment', title = 'Fiber Optic Users With Online Security and Online Backup') 
+```
+
+```{r}
+df %>% 
+  filter(OnlineSecurity == 'Yes' & OnlineBackup == 'Yes' & InternetService == 'Fiber optic') %>%
+  group_by(SeniorCitizen, tenure, Churn,) %>%
+  summarise(avgpayment = mean(MonthlyCharges)) %>%
+  ggplot(aes(x=tenure, y=avgpayment, color = Churn)) + geom_point() +geom_smooth()+ facet_grid(.~ SeniorCitizen) + labs(y='Average Monthly Payment', title = 'Fiber Optic Users With Online Security and Online Backup') 
+
+```
+Here, we can see a similar story as the first bundle but with small tweeks. So for tenure less than 25 months, we can see that the people who are churning out are the ones who are on average charged more.
+
+### online security, device protection
+
+```{r}
+df %>% 
+  filter(OnlineSecurity == 'Yes' & DeviceProtection == 'Yes' & InternetService == 'Fiber optic') %>%
+  group_by(tenure, Churn,) %>%
+  summarise(avgpayment = mean(MonthlyCharges)) %>%
+  ggplot(aes(x=tenure, y=avgpayment, color = Churn)) + geom_point() +geom_smooth()  + labs(y='Average Monthly Payment', title = 'Fiber Optic Users With Online Security and Device Protection') 
+```
+
+```{r}
+df %>% 
+  filter(OnlineSecurity == 'Yes' & DeviceProtection == 'Yes' & InternetService == 'Fiber optic') %>%
+  group_by(SeniorCitizen, tenure, Churn,) %>%
+  summarise(avgpayment = mean(MonthlyCharges)) %>%
+  ggplot(aes(x=tenure, y=avgpayment, color = Churn)) + geom_point() +geom_smooth() + facet_grid(.~SeniorCitizen) + labs(y='Average Monthly Payment', title = 'Fiber Optic Users With Online Security and Device Protection') 
+```
+
+Online Security and Device protection does not seem to convey any story for senior customers but for non-senior customers the people who Churn out are the ones who are paying more during any given time of the tenure.
+
+
+### online backup, techsupport
+
+```{r}
+df %>% 
+  filter(OnlineBackup == 'Yes' & TechSupport == 'Yes' & InternetService == 'Fiber optic') %>%
+  group_by(tenure, Churn,) %>%
+  summarise(avgpayment = mean(MonthlyCharges)) %>%
+  ggplot(aes(x=tenure, y=avgpayment, color = Churn)) + geom_point() +geom_smooth()+ labs(y='Average Monthly Payment', title = 'Fiber Optic Users With Online Backup and Tech Support') 
+```
+
+```{r}
+df %>% 
+  filter(OnlineBackup == 'Yes' & TechSupport == 'Yes' & InternetService == 'Fiber optic') %>%
+  group_by(SeniorCitizen, tenure, Churn) %>%
+  summarise(avgpayment = mean(MonthlyCharges)) %>%
+  ggplot(aes(x=tenure, y=avgpayment, color = Churn)) + geom_point() +geom_smooth() + facet_grid(.~SeniorCitizen)+ labs(y='Average Monthly Payment', title = 'Fiber Optic Users With Online Backup and Tech Support') 
+```
+
+
+When the customers have Online backup and Tech support the churn rate is more or less the same in the non-senior section of the customers but seniors and who are charged more tend to churn out after 30 months or so.
+
+
+# Conclusion
+The result of associate rules mining aligns with previous assumption that having more subscribed services with company, users are less likely to churn. However, not every bundling package would impact on customers churning. By applying associate rules we find 4 bundling services that make fiber optic users 1.4 times more likely to stay.
+And by visualizing the price difference for customers who stay and customer whoc churn we figure out the price that Telco should charge per month in order to not deter away users.
+
+
+
+
+
+
+
